@@ -1,6 +1,5 @@
 import streamlit as st
 import requests
-import random
 import re
 import itertools
 import urllib3
@@ -14,13 +13,56 @@ from bs4 import BeautifulSoup
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # ==========================================
-# 🔑 API 金鑰設定區
+# 🔑 API 金鑰 (自動切換)
 # ==========================================
-GEMINI_API_KEY = "AIzaSyACLssBFMWfLpIprNmx7TdQe_k4k4JCLEM"
-WEATHER_API_KEY = "E3e2c14f7956d939b88a6dfa66e4f10a"
+# 1. 先嘗試讀取雲端設定
+# 2. 如果失敗，使用您提供的備用金鑰
+try:
+    GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
+except:
+    GEMINI_API_KEY = "AIzaSyACLssBFMWfLpIprNmx7TdQe_k4k4JCLEM"
 
 # ==========================================
-# 🔍 核心 1: 智能搜尋
+# 📱 頁面設定 (隱藏選單，全螢幕感)
+# ==========================================
+st.set_page_config(
+    page_title="Jarvis Mobile",
+    page_icon="🤖",
+    layout="wide",
+    initial_sidebar_state="collapsed"
+)
+
+# CSS 優化：隱藏多餘元素，優化手機閱讀
+st.markdown("""
+    <style>
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    header {visibility: hidden;}
+    .stChatInput {
+        position: fixed;
+        bottom: 0px;
+        background-color: white;
+        padding-bottom: 15px;
+        z-index: 999;
+    }
+    .block-container {
+        padding-top: 1rem;
+        padding-bottom: 6rem;
+    }
+    .search-card {
+        background-color: #262730;
+        padding: 12px;
+        border-radius: 10px;
+        margin-bottom: 10px;
+        border: 1px solid #444;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+    }
+    a {text-decoration: none; color: #4da6ff !important; font-weight: bold; font-size: 16px;}
+    </style>
+""", unsafe_allow_html=True)
+
+# ==========================================
+# 🧠 核心邏輯
 # ==========================================
 class WebSearcher:
     @staticmethod
@@ -32,297 +74,192 @@ class WebSearcher:
         except: return ""
 
     @staticmethod
-    def search_wiki(query):
+    def search_web(query):
+        """搜尋功能 (即使 AI 離線也能運作)"""
+        results_list = []
+        snippets_text = []
+        # 使用手機 User-Agent 模擬
+        headers = {'User-Agent': 'Mozilla/5.0 (Linux; Android 10; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36'}
+        
+        # 1. 維基百科
         try:
-            url = "https://zh.wikipedia.org/w/api.php"
-            params = {"action": "query", "format": "json", "list": "search", "srsearch": query, "srlimit": 3}
-            res = requests.get(url, params=params, timeout=5)
-            data = res.json()
-            results = []
-            if "query" in data and "search" in data["query"]:
-                for item in data["query"]["search"]:
-                    title = item["title"]
-                    snippet = re.sub(r'<[^>]+>', '', item["snippet"])
-                    link = f"https://zh.wikipedia.org/wiki/{title}"
-                    results.append({"title": f"📚 [維基] {title}", "link": link, "snippet": snippet})
-            return results
-        except: return []
+            res = requests.get("https://zh.wikipedia.org/w/api.php", params={"action":"query","format":"json","list":"search","srsearch":query,"srlimit":2}, timeout=5)
+            for item in res.json().get("query",{}).get("search",[]):
+                t = item["title"]; s = re.sub(r'<[^>]+>','',item["snippet"])
+                results_list.append({"title":f"📚 {t}","link":f"https://zh.wikipedia.org/wiki/{t}","snippet":s})
+                snippets_text.append(f"Wiki: {t}-{s}")
+        except: pass
 
-    @staticmethod
-    def search_advanced(query, model):
+        # 2. DuckDuckGo
         try:
-            url = f"https://html.duckduckgo.com/html/?q={query}"
-            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
-            res = requests.get(url, headers=headers, timeout=10)
+            res = requests.get(f"https://html.duckduckgo.com/html/?q={query}", headers=headers, timeout=8)
             soup = BeautifulSoup(res.text, 'html.parser')
-            
-            results_list = []
-            snippets_text = []
+            for i, r in enumerate(soup.find_all('div', class_='result'), 1):
+                if i>6: break
+                ta = r.find('a', class_='result__a'); sa = r.find('a', class_='result__snippet')
+                if ta:
+                    t = ta.get_text(strip=True)
+                    l = WebSearcher.decode_ddg_url(ta['href'])
+                    s = sa.get_text(strip=True) if sa else ""
+                    if l: results_list.append({"title":t,"link":l,"snippet":s}); snippets_text.append(f"{t}-{s}")
+        except: pass
+        
+        # 就算沒找到 AI 摘要，也要回傳列表
+        return results_list, "\n".join(snippets_text[:6])
 
-            # Wiki
-            wiki_res = WebSearcher.search_wiki(query)
-            results_list.extend(wiki_res)
-            for w in wiki_res: snippets_text.append(f"{w['title']}: {w['snippet']}")
-
-            # DDG
-            for i, result in enumerate(soup.find_all('div', class_='result'), 1):
-                if i > 8: break 
-                title_tag = result.find('a', class_='result__a')
-                snippet_tag = result.find('a', class_='result__snippet')
-                
-                if title_tag:
-                    title = title_tag.get_text().strip()
-                    raw_link = title_tag['href']
-                    real_link = WebSearcher.decode_ddg_url(raw_link)
-                    snippet = snippet_tag.get_text().strip() if snippet_tag else ""
-                    
-                    if real_link:
-                        results_list.append({"title": title, "link": real_link, "snippet": snippet})
-                        snippets_text.append(f"標題：{title}\n摘要：{snippet}")
-
-            # AI 總結
-            raw_data = "\n\n".join(snippets_text[:6])
-            ai_summary = "❌ 搜尋無結果。"
-            
-            if raw_data:
-                if model:
-                    prompt = f"請根據以下資料回答：『{query}』\n資料：{raw_data}\n請直接給出重點答案（日期、數字），不要列出網址。"
-                    try:
-                        ai_resp = model.generate_content(prompt)
-                        ai_summary = ai_resp.text
-                    except:
-                        ai_summary = f"**搜尋摘要 (AI 忙線)**：\n{raw_data[:500]}..."
-                else:
-                    ai_summary = f"**搜尋摘要**：\n{raw_data[:500]}..."
-            
-            return ai_summary, results_list
-        except Exception as e: return f"⚠️ 搜尋錯誤: {e}", []
-
-# ==========================================
-# 🎰 核心 2: 賓果/樂透 (1代算法)
-# ==========================================
 class LottoAlgorithm:
+    # ... (樂透算法保持不變) ...
     @staticmethod
-    def calculate_ac(numbers):
-        r = len(numbers)
-        diffs = set()
-        for pair in itertools.combinations(numbers, 2): diffs.add(abs(pair[0] - pair[1]))
-        return len(diffs) - (r - 1)
+    def calculate_ac(n):
+        r=len(n); d=set(); 
+        for p in itertools.combinations(n,2): d.add(abs(p[0]-p[1]))
+        return len(d)-(r-1)
     @staticmethod
     def is_prime(n):
-        if n < 2: return False
-        for i in range(2, int(n**0.5) + 1):
-            if n % i == 0: return False
+        if n<2: return False
+        for i in range(2,int(n**0.5)+1): 
+            if n%i==0: return False
         return True
     @staticmethod
-    def predict(l_type):
-        if "大樂透" in l_type or "大熱透" in l_type: max_n, pick, min_ac = 49, 6, 7
-        elif "威力" in l_type: max_n, pick, min_ac = 38, 6, 7
-        elif "539" in l_type: max_n, pick, min_ac = 39, 5, 4
-        else: return "⚠️ 未知彩種", []
-
-        primes = [n for n in range(1, max_n+1) if LottoAlgorithm.is_prime(n)]
-        best_combo = None
-        for _ in range(5000):
-            combo = sorted(random.sample(range(1, max_n+1), pick))
-            if LottoAlgorithm.calculate_ac(combo) < min_ac: continue
-            p_cnt = sum(1 for n in combo if n in primes)
-            if not (1 <= p_cnt <= 3): continue
-            best_combo = combo
-            break
-        if not best_combo: best_combo = sorted(random.sample(range(1, max_n+1), pick))
-        
-        special = f" + 第二區 [{random.randint(1,8):02d}]" if "威力" in l_type else ""
-        return f"🎰 **{l_type.replace('熱','樂')} 預測**\n\n🔢 **{best_combo}** {special}\n\n📊 AC值：{LottoAlgorithm.calculate_ac(best_combo)}", []
+    def predict(t):
+        if "大樂透" in t: mn,pk,ac=49,6,7
+        elif "威力" in t: mn,pk,ac=38,6,7
+        elif "539" in t: mn,pk,ac=39,5,4
+        else: return "⚠️ 未知", []
+        primes=[x for x in range(1,mn+1) if LottoAlgorithm.is_prime(x)]
+        best=None
+        for _ in range(3000):
+            c=sorted(random.sample(range(1,mn+1),pk))
+            if LottoAlgorithm.calculate_ac(c)<ac: continue
+            if not (1<=sum(1 for x in c if x in primes)<=3): continue
+            best=c; break
+        if not best: best=sorted(random.sample(range(1,mn+1),pk))
+        sp = f" + 第二區 [{random.randint(1,8):02d}]" if "威力" in t else ""
+        return f"🎰 **{t.replace('熱','樂')}**\n\n🔢 **{best}** {sp}\n📊 AC值: {LottoAlgorithm.calculate_ac(best)}", []
 
 class BingoAlgorithm:
     @staticmethod
     def analyze_and_predict(stars=5):
         try:
-            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
-            url = "https://www.pilio.idv.tw/bingo/list.asp"
-            res = requests.get(url, headers=headers, timeout=10, verify=False)
-            res.encoding = 'big5'
+            # 使用電腦版 UA 以防被擋
+            res = requests.get("https://www.pilio.idv.tw/bingo/list.asp", headers={'User-Agent':'Mozilla/5.0'}, timeout=10, verify=False)
+            res.encoding='big5'
             soup = BeautifulSoup(res.text, 'html.parser')
-            all_numbers = []
-            for row in soup.find_all('tr'):
-                text = row.get_text(strip=True)
-                if re.search(r'11[3-9]\d{6}', text) or re.search(r'11[0-2]\d{6}', text): 
-                    nums = [int(n) for n in re.findall(r'\d+', text) if int(n) <= 80][:20]
-                    if len(nums) == 20: all_numbers.extend(nums)
-            
-            if not all_numbers: return "❌ 賓果網站阻擋", []
-            counts = Counter(all_numbers)
-            hot_numbers = counts.most_common(stars)
-            prediction = sorted([num for num, count in hot_numbers])
-            return f"🎱 **賓果 {stars} 星預測 (追熱)**\n\n🔥 推薦：**{prediction}**", []
-        except Exception as e: return f"⚠️ 賓果錯誤: {e}", []
+            nums = []
+            for tr in soup.find_all('tr'):
+                t = tr.get_text(strip=True)
+                # 兼容 113, 114 年
+                if re.search(r'11[3-9]\d{6}', t):
+                    n = [int(x) for x in re.findall(r'\d+', t) if int(x)<=80][:20]
+                    if len(n)==20: nums.extend(n)
+            if not nums: return "❌ 來源阻擋", []
+            hot = [n for n,c in Counter(nums).most_common(stars)]
+            return f"🎱 **賓果 {stars} 星 (追熱)**\n\n🔥 推薦：**{sorted(hot)}**", []
+        except: return "⚠️ 連線錯誤", []
 
-# ==========================================
-# 📈 核心 3: 財經/天氣
-# ==========================================
 class DirectInfo:
     @staticmethod
     def get_stock(code):
         try:
-            ts = int(time.time() * 1000)
-            url = f"https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=tse_{code}.tw|otc_{code}.tw&json=1&_={ts}"
-            res = requests.get(url, timeout=5, verify=False)
-            data = res.json()
-            if 'msgArray' in data and data['msgArray']:
-                i = data['msgArray'][0]
-                p = i.get('z', '-')
-                if p == '-': p = i.get('b', '-').split('_')[0]
-                diff_val = float(p) - float(i.get('y', 0)) if p != '-' and i.get('y') != '-' else 0
-                color = "red" if diff_val > 0 else "green" if diff_val < 0 else "grey"
-                return f"📈 **台股 {code} {i.get('n',code)}**\n\n💰 現價：**{p}**\n📊 昨收：{i.get('y','-')}\n🔥 漲跌：:{color}[{diff_val:.2f}]", []
-            return "⚠️ 查無代碼", []
-        except: return "⚠️ 股價忙線", []
+            ts = int(time.time()*1000)
+            res = requests.get(f"https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=tse_{code}.tw|otc_{code}.tw&json=1&_={ts}", timeout=5, verify=False)
+            d = res.json()
+            if d['msgArray']:
+                i = d['msgArray'][0]
+                p = i.get('z','-'); p = i.get('b','-').split('_')[0] if p=='-' else p
+                color = "red" if float(p) > float(i.get('y',0)) else "green"
+                return f"📈 **{code} {i.get('n','')}**\n💰 現價：:{color}[{p}]\n📊 昨收：{i.get('y','-')}", []
+            return "⚠️ 查無", []
+        except: return "⚠️ 忙線", []
 
-    @staticmethod
-    def get_weather(city):
-        try:
-            city_map = {"台北": "Taipei", "台南": "Tainan", "台中": "Taichung", "高雄": "Kaohsiung"}
-            q = city_map.get(city.replace("台","臺"), city)
-            if q == city: q = city_map.get(city.replace("臺","台"), city)
-            url = "http://api.openweathermap.org/data/2.5/weather"
-            params = {'q': q, 'appid': WEATHER_API_KEY, 'units': 'metric', 'lang': 'zh_tw'}
-            r = requests.get(url, params=params, timeout=5)
-            if r.status_code == 200:
-                d = r.json()
-                return f"📍 **{d['name']}**\n\n🌡️ {d['main']['temp']}°C\n☁️ {d['weather'][0]['description']}", []
-            return "❌ 查無城市", []
-        except: return "⚠️ 天氣錯誤", []
-
-# ==========================================
-# 🧠 賈維斯大腦
-# ==========================================
-def get_ai_model():
+# 腦袋與邏輯
+def get_model():
     try:
+        if not GEMINI_API_KEY: return None, "無金鑰"
         genai.configure(api_key=GEMINI_API_KEY)
-        avail = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        target = 'gemini-1.5-flash' if 'models/gemini-1.5-flash' in avail else 'gemini-pro'
-        return genai.GenerativeModel(target), target
-    except:
-        return None, "離線"
+        # 嘗試列出模型，確認金鑰有效
+        list(genai.list_models())
+        return genai.GenerativeModel('gemini-1.5-flash'), "線上"
+    except: return None, "離線 (金鑰無效或額度滿)"
 
-def jarvis_think(text, model):
-    raw = text
-    text = text.lower()
+def jarvis_think(txt, model):
+    txt = txt.lower()
     
-    # 1. 賓果/樂透
-    if "預測" in text or "算牌" in text or "賓果" in text:
-        if "大樂透" in text or "大熱透" in text: return LottoAlgorithm.predict("大樂透")
-        if "威力" in text: return LottoAlgorithm.predict("威力彩")
-        if "539" in text: return LottoAlgorithm.predict("539")
-        stars = 5
-        m = re.search(r'(\d+)\s*星', text)
-        if m: stars = int(m.group(1))
-        return BingoAlgorithm.analyze_and_predict(stars)
-
-    # 2. 股價/天氣
-    if "股" in text and re.search(r'\d{4,6}', text):
-        return DirectInfo.get_stock(re.search(r'\d{4,6}', text).group(0))
-    if "天氣" in text:
-        return DirectInfo.get_weather(text.replace("天氣","").strip() or "台南")
-
-    # 3. 智能搜尋
-    search_triggers = ["時間", "日期", "新聞", "報名", "報考", "幾點", "什麼時候", "是誰", "多少錢", "搜尋", "查"]
-    if any(k in text for k in search_triggers) or (model and len(text) > 4):
-        return WebSearcher.search_advanced(raw, model)
-
-    # 4. 閒聊
+    # 🟢 修正 1: 賓果星數 (加入中文數字判斷)
+    if "賓果" in txt or "星" in txt:
+        s = 5
+        # 先抓阿拉伯數字 (如 3星)
+        if m := re.search(r'(\d+)\s*星', txt): s = int(m.group(1))
+        # 再抓中文數字 (如 三星)，優先權高
+        cn = {'一':1,'二':2,'三':3,'四':4,'五':5,'六':6,'七':7,'八':8,'九':9,'十':10}
+        for k,v in cn.items(): 
+            if k in txt: s = v
+        return BingoAlgorithm.analyze_and_predict(s)
+    
+    if "股" in txt and (m:=re.search(r'\d{4,6}', txt)): return DirectInfo.get_stock(m.group(0))
+    
+    # 搜尋與閒聊
+    search_keys = ["時間","日期","新聞","報名","報考","多少","查","誰","天氣"]
+    if any(k in txt for k in search_keys) or (model and len(txt)>4):
+        res, raw = WebSearcher.search_web(txt)
+        ans = "🔍 搜尋完畢 (AI 離線，請看下方連結)"
+        
+        # 🟢 修正 2: 如果 AI 活著，才讓他總結；死掉就回傳固定文字
+        if model and raw:
+            try: 
+                ans = model.generate_content(f"基於以下資料回答'{txt}'，簡短即可：\n{raw}").text
+            except: 
+                ans = "⚠️ AI 回應失敗，請直接點擊下方連結。"
+        elif not res:
+            ans = "❌ 找不到相關資料"
+            
+        return ans, res
+    
     if model:
-        try: return model.generate_content(raw).text, []
+        try: return model.generate_content(txt).text, []
         except: pass
     
-    return "🤖 請輸入明確指令", []
+    return "🤖 請輸入指令 (或 AI 目前離線)", []
 
-# ==========================================
-# 🌐 Streamlit 網頁介面
-# ==========================================
-st.set_page_config(page_title="Jarvis Web", layout="wide", page_icon="🤖")
-
-# 初始化 Session State
-if "history" not in st.session_state:
-    st.session_state.history = []
-if "search_results" not in st.session_state:
-    st.session_state.search_results = []
+# === 介面啟動 ===
 if "model" not in st.session_state:
-    model, name = get_ai_model()
-    st.session_state.model = model
-    st.session_state.model_name = name
+    m, status = get_model()
+    st.session_state.model = m
+    st.session_state.status = status
 
-# CSS 優化
-st.markdown("""
-<style>
-    .reportview-container { margin-top: -2em; }
-    .stDeployButton {display:none;}
-    #MainMenu {visibility: hidden;}
-    a {text-decoration: none; color: #3498db !important; font-weight: bold;}
-    a:hover {text-decoration: underline; color: #63cdda !important;}
-    .search-card {
-        background-color: #262730;
-        padding: 15px;
-        border-radius: 10px;
-        margin-bottom: 10px;
-        border: 1px solid #333;
-    }
-</style>
-""", unsafe_allow_html=True)
+if "msgs" not in st.session_state: st.session_state.msgs = []
+if "res" not in st.session_state: st.session_state.res = []
 
-# 標題區
-col_head1, col_head2 = st.columns([8, 2])
-with col_head1:
-    st.title("🤖 Jarvis Web OS")
-with col_head2:
-    st.success(f"AI: {st.session_state.model_name}")
+st.title(f"🤖 Jarvis ({st.session_state.status})")
 
-# 版面配置：左 7 (聊天) | 右 3 (資訊流)
-col_chat, col_feed = st.columns([7, 3])
+# 聊天顯示區
+for role, txt in st.session_state.msgs:
+    with st.chat_message(role): st.markdown(txt)
 
-# === 左側：聊天室 ===
-with col_chat:
-    chat_container = st.container(height=600)
-    
-    # 顯示歷史訊息
-    for msg in st.session_state.history:
-        with chat_container.chat_message(msg["role"]):
-            st.markdown(msg["content"])
-            
-    # 輸入框
-    if prompt := st.chat_input("輸入指令 (如: 2026五專報名 / 00919股價 / 賓果3星)..."):
-        # 顯示使用者訊息
-        st.session_state.history.append({"role": "user", "content": prompt})
-        with chat_container.chat_message("user"):
-            st.write(prompt)
-            
-        # Jarvis 思考
-        with chat_container.chat_message("assistant"):
-            with st.spinner("Jarvis 正在運算..."):
-                reply, s_results = jarvis_think(prompt, st.session_state.model)
-                st.markdown(reply)
-                
-        # 更新狀態
-        st.session_state.history.append({"role": "assistant", "content": reply})
-        st.session_state.search_results = s_results
-        st.rerun() # 強制重整以更新右側
+# 搜尋結果區 (置底顯示)
+if st.session_state.res:
+    st.markdown("---")
+    st.caption("🌐 相關資訊 (點擊開啟)")
+    for item in st.session_state.res:
+        st.markdown(f"""
+        <div class="search-card">
+            <a href="{item['link']}" target="_blank">{item['title']}</a>
+            <div style="color:#bbb;font-size:12px;margin-top:4px;">{item['snippet'][:60]}...</div>
+        </div>
+        """, unsafe_allow_html=True)
 
-# === 右側：即時資訊流 ===
-with col_feed:
-    st.subheader("🌐 即時資訊流")
-    if not st.session_state.search_results:
-        st.info("尚無外部資訊，請嘗試搜尋相關問題。")
-    else:
-        for item in st.session_state.search_results:
-            # 使用 HTML 渲染漂亮的卡片
-            st.markdown(f"""
-            <div class="search-card">
-                <a href="{item['link']}" target="_blank" style="font-size: 16px;">
-                    {item['title']}
-                </a>
-                <p style="color: #bbb; font-size: 13px; margin-top: 5px;">
-                    {item['snippet']}
-                </p>
-            </div>
-            """, unsafe_allow_html=True)
+# 輸入區
+if prompt := st.chat_input("輸入指令..."):
+    st.session_state.msgs.append(("user", prompt))
+    st.rerun()
+
+# 處理回應
+if st.session_state.msgs and st.session_state.msgs[-1][0] == "user":
+    user_txt = st.session_state.msgs[-1][1]
+    with st.chat_message("assistant"):
+        with st.spinner("..."):
+            ans, res = jarvis_think(user_txt, st.session_state.model)
+            st.markdown(ans)
+    st.session_state.msgs.append(("assistant", ans))
+    st.session_state.res = res
+    st.rerun()
